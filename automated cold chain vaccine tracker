@@ -1,0 +1,498 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHTesp.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <math.h>
+
+// =====================================================
+// I2C
+// =====================================================
+
+#define SDA_PIN 21
+#define SCL_PIN 22
+
+// =====================================================
+// LCD 16x2
+// =====================================================
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// =====================================================
+// DHT22
+// =====================================================
+
+DHTesp dht;
+
+#define DHT_PIN 15
+
+// =====================================================
+// MPU6050
+// =====================================================
+
+Adafruit_MPU6050 mpu;
+
+// =====================================================
+// OUTPUTS
+// =====================================================
+
+#define RED_LED_PIN 25
+#define GREEN_LED_PIN 26
+#define BUZZER_PIN 4
+#define RELAY_PIN 18
+
+// =====================================================
+// TEMPERATURE LIMITS
+// =====================================================
+
+#define TEMP_LOW 2.0
+#define TEMP_HIGH 15.0
+#define COOLING_OFF_TEMP 14.0
+
+// =====================================================
+// SHOCK LIMIT
+// =====================================================
+
+#define SHOCK_THRESHOLD 20.0
+
+// =====================================================
+// VARIABLES
+// =====================================================
+
+float temperature = 0.0;
+float humidity = 0.0;
+
+float ax = 0.0;
+float ay = 0.0;
+float az = 0.0;
+
+float totalAcceleration = 0.0;
+
+bool shockDetected = false;
+bool coolingActive = false;
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup()
+{
+  Serial.begin(115200);
+
+  delay(3000);
+
+  Serial.println();
+  Serial.println("================================");
+  Serial.println("    SMART COLD CHAIN TRACKER");
+  Serial.println("================================");
+
+  // ===================================================
+  // I2C
+  // ===================================================
+
+  Wire.begin(21, 22);
+
+  Serial.println("I2C STARTED");
+
+  // ===================================================
+  // MPU6050
+  // ===================================================
+
+  Serial.println("STARTING MPU6050...");
+
+  if (mpu.begin(0x68, &Wire))
+  {
+    Serial.println("MPU6050 FOUND!");
+
+    mpu.setAccelerometerRange(
+      MPU6050_RANGE_8_G
+    );
+
+    mpu.setGyroRange(
+      MPU6050_RANGE_500_DEG
+    );
+
+    mpu.setFilterBandwidth(
+      MPU6050_BAND_21_HZ
+    );
+  }
+  else
+  {
+    Serial.println("MPU6050 FAILED!");
+  }
+
+  // ===================================================
+  // LCD
+  // ===================================================
+
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("SMART COLD");
+
+  lcd.setCursor(0, 1);
+  lcd.print("CHAIN TRACKER");
+
+  delay(2000);
+
+  // ===================================================
+  // DHT22
+  // ===================================================
+
+  dht.setup(DHT_PIN, DHTesp::DHT22);
+
+  Serial.println("DHT22 READY");
+
+  // ===================================================
+  // OUTPUTS
+  // ===================================================
+
+  pinMode(RED_LED_PIN, OUTPUT);
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+
+  digitalWrite(RED_LED_PIN, LOW);
+  digitalWrite(GREEN_LED_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(RELAY_PIN, LOW);
+
+  Serial.println("RED LED READY");
+  Serial.println("GREEN LED READY");
+  Serial.println("BUZZER READY");
+  Serial.println("RELAY READY");
+
+  Serial.println("--------------------------------");
+  Serial.println("SYSTEM READY");
+  Serial.println("--------------------------------");
+
+  delay(1000);
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop()
+{
+  // ===================================================
+  // READ DHT22
+  // ===================================================
+
+  TempAndHumidity data =
+    dht.getTempAndHumidity();
+
+  temperature = data.temperature;
+  humidity = data.humidity;
+
+  if (isnan(temperature) || isnan(humidity))
+  {
+    Serial.println("DHT22 ERROR!");
+
+    lcd.clear();
+
+    lcd.setCursor(0, 0);
+    lcd.print("DHT22 ERROR");
+
+    lcd.setCursor(0, 1);
+    lcd.print("CHECK SENSOR");
+
+    digitalWrite(RED_LED_PIN, LOW);
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+    digitalWrite(RELAY_PIN, LOW);
+
+    delay(2000);
+
+    return;
+  }
+
+  // ===================================================
+  // READ MPU6050
+  // ===================================================
+
+  sensors_event_t accel;
+  sensors_event_t gyro;
+  sensors_event_t mpuTemp;
+
+  mpu.getEvent(
+    &accel,
+    &gyro,
+    &mpuTemp
+  );
+
+  ax = accel.acceleration.x;
+  ay = accel.acceleration.y;
+  az = accel.acceleration.z;
+
+  totalAcceleration =
+    sqrt(
+      (ax * ax) +
+      (ay * ay) +
+      (az * az)
+    );
+
+  // ===================================================
+  // SHOCK DETECTION
+  // ===================================================
+
+  if (totalAcceleration > SHOCK_THRESHOLD)
+  {
+    shockDetected = true;
+  }
+  else
+  {
+    shockDetected = false;
+  }
+
+  // ===================================================
+  // TEMPERATURE / COOLING
+  // ===================================================
+
+  if (temperature > TEMP_HIGH)
+  {
+    coolingActive = true;
+  }
+  else if (temperature <= COOLING_OFF_TEMP)
+  {
+    coolingActive = false;
+  }
+
+  if (temperature < TEMP_LOW)
+  {
+    coolingActive = false;
+  }
+
+  // ===================================================
+  // RELAY
+  // ===================================================
+
+  if (coolingActive)
+  {
+    digitalWrite(RELAY_PIN, HIGH);
+  }
+  else
+  {
+    digitalWrite(RELAY_PIN, LOW);
+  }
+
+  // ===================================================
+  // LED STATUS
+  //
+  // GREEN = TEMPERATURE SAFE
+  // RED   = TEMPERATURE UNSAFE OR SHOCK
+  // ===================================================
+
+  if (shockDetected)
+  {
+    // Shock = RED
+    digitalWrite(RED_LED_PIN, HIGH);
+    digitalWrite(GREEN_LED_PIN, LOW);
+  }
+  else if (temperature > TEMP_HIGH || temperature < TEMP_LOW)
+  {
+    // Temperature unsafe = RED
+    digitalWrite(RED_LED_PIN, HIGH);
+    digitalWrite(GREEN_LED_PIN, LOW);
+  }
+  else
+  {
+    // Temperature safe = GREEN
+    digitalWrite(RED_LED_PIN, LOW);
+    digitalWrite(GREEN_LED_PIN, HIGH);
+  }
+
+  // ===================================================
+  // BUZZER
+  // ONLY SHOCK ACTIVATES BUZZER
+  // ===================================================
+
+  if (shockDetected)
+  {
+    digitalWrite(BUZZER_PIN, HIGH);
+  }
+  else
+  {
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // ===================================================
+  // SERIAL MONITOR
+  // ===================================================
+
+  Serial.println();
+  Serial.println("--------------------------------");
+
+  Serial.print("Temperature: ");
+  Serial.print(temperature, 2);
+  Serial.println(" C");
+
+  Serial.print("Humidity: ");
+  Serial.print(humidity, 2);
+  Serial.println(" %");
+
+  Serial.print("X: ");
+  Serial.print(ax, 2);
+  Serial.println(" m/s2");
+
+  Serial.print("Y: ");
+  Serial.print(ay, 2);
+  Serial.println(" m/s2");
+
+  Serial.print("Z: ");
+  Serial.print(az, 2);
+  Serial.println(" m/s2");
+
+  Serial.print("Total Acceleration: ");
+  Serial.print(totalAcceleration, 2);
+  Serial.println(" m/s2");
+
+  Serial.print("Shock: ");
+
+  if (shockDetected)
+  {
+    Serial.println("DETECTED");
+  }
+  else
+  {
+    Serial.println("NO");
+  }
+
+  Serial.print("Cooling: ");
+
+  if (coolingActive)
+  {
+    Serial.println("ON");
+  }
+  else
+  {
+    Serial.println("OFF");
+  }
+
+  // ===================================================
+  // STATUS
+  // ===================================================
+
+  if (shockDetected)
+  {
+    Serial.println("STATUS: SHOCK DETECTED");
+  }
+  else if (temperature > TEMP_HIGH)
+  {
+    Serial.println("STATUS: TEMPERATURE ALERT");
+  }
+  else if (temperature < TEMP_LOW)
+  {
+    Serial.println("STATUS: TEMPERATURE TOO LOW");
+  }
+  else
+  {
+    Serial.println("STATUS: SAFE");
+  }
+
+  // ===================================================
+  // LCD SCREEN 1
+  // TEMPERATURE + HUMIDITY
+  // ===================================================
+
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("TEMP:");
+  lcd.print(temperature, 1);
+  lcd.print((char)223);
+  lcd.print("C");
+
+  lcd.setCursor(0, 1);
+  lcd.print("HUM:");
+  lcd.print(humidity, 0);
+  lcd.print("%");
+
+  delay(2000);
+
+  // ===================================================
+  // LCD SCREEN 2
+  // ACCELERATION X/Y
+  // ===================================================
+
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("X:");
+  lcd.print(ax, 1);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Y:");
+  lcd.print(ay, 1);
+
+  delay(2000);
+
+  // ===================================================
+  // LCD SCREEN 3
+  // ACCELERATION Z/TOTAL
+  // ===================================================
+
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Z:");
+  lcd.print(az, 1);
+
+  lcd.setCursor(0, 1);
+  lcd.print("ACC:");
+  lcd.print(totalAcceleration, 1);
+
+  delay(2000);
+
+  // ===================================================
+  // LCD SCREEN 4
+  // STATUS
+  // ===================================================
+
+  lcd.clear();
+
+  if (shockDetected)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("SHOCK DETECTED");
+
+    lcd.setCursor(0, 1);
+    lcd.print("ALERT!");
+  }
+  else if (temperature > TEMP_HIGH)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("TEMP ALERT");
+
+    lcd.setCursor(0, 1);
+    lcd.print("COOLING ON");
+  }
+  else if (temperature < TEMP_LOW)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("TEMP TOO LOW");
+
+    lcd.setCursor(0, 1);
+    lcd.print("ALERT!");
+  }
+  else
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("STATUS: SAFE");
+
+    lcd.setCursor(0, 1);
+
+    if (coolingActive)
+    {
+      lcd.print("COOLING ON");
+    }
+    else
+    {
+      lcd.print("COOLING OFF");
+    }
+  }
+
+  delay(2000);
+}
